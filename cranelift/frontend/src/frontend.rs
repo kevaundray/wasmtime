@@ -396,7 +396,7 @@ impl<'a> FunctionBuilder<'a> {
             .unwrap_or_else(|_| panic!("the variable {:?} has been declared multiple times", var))
     }
 
-    /// Returns the Cranelift IR necessary to use a previously defined user
+    /// Returns the Cranelift IR value necessary to use a previously defined user
     /// variable, returning an error if this is not possible.
     pub fn try_use_var(&mut self, var: Variable) -> Result<Value, UseVariableError> {
         // Assert that we're about to add instructions to this block using the definition of the
