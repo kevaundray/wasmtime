@@ -3250,15 +3250,38 @@ impl MachInstEmit for Inst {
                 // the middle; we depend on hardcoded PC-rel addressing below.
 
                 // Branch to default when condition code from prior comparison indicates.
-                let br =
-                    enc_conditional_br(BranchTarget::Label(default), CondBrKind::Cond(Cond::Hs));
-
+                //
                 // No need to inform the sink's branch folding logic about this branch, because it
                 // will not be merged with any other branch, flipped, or elided (it is not preceded
                 // or succeeded by any other branch). Just emit it with the label use.
-                let default_br_offset = sink.cur_offset();
-                sink.use_label_at_offset(default_br_offset, default, LabelUse::Branch19);
-                sink.put4(br);
+                //
+                // The jump table is emitted inline below, as part of this one instruction, so the
+                // earliest point at which the `MachBuffer` can place a veneer for this branch is
+                // after the end of the table. If the table is large enough that this point may be
+                // beyond the +/- 1 MiB range of a conditional branch (`Branch19`), branch over an
+                // unconditional `b default` (`Branch26`, +/- 128 MiB) instead.
+                let jt_bytes = u64::try_from(targets.len()).unwrap() * 4;
+                // Slack for the rest of this sequence before the table, the jump-around branch
+                // before the island and the veneer's alignment.
+                let slack = 64;
+                if jt_bytes + slack <= u64::from(LabelUse::Branch19.max_pos_range()) {
+                    let br = enc_conditional_br(
+                        BranchTarget::Label(default),
+                        CondBrKind::Cond(Cond::Hs),
+                    );
+                    let default_br_offset = sink.cur_offset();
+                    sink.use_label_at_offset(default_br_offset, default, LabelUse::Branch19);
+                    sink.put4(br);
+                } else {
+                    // b.lo 1f ; b default ; 1:
+                    sink.put4(enc_conditional_br(
+                        BranchTarget::ResolvedOffset(8),
+                        CondBrKind::Cond(Cond::Lo),
+                    ));
+                    let default_br_offset = sink.cur_offset();
+                    sink.use_label_at_offset(default_br_offset, default, LabelUse::Branch26);
+                    sink.put4(enc_jump26(0b000101, 0));
+                }
 
                 // Overwrite the index with a zero when the above
                 // branch misspeculates (Spectre mitigation). Save the

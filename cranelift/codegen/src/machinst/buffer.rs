@@ -1630,6 +1630,13 @@ impl<I: VCodeInst> MachBuffer<I> {
         self.align_to(I::LabelUse::ALIGN);
         let veneer_offset = self.cur_offset();
         trace!("making a veneer at {}", veneer_offset);
+        // The veneer is always placed after the label use, and it must be
+        // reachable from there: otherwise patching would silently produce a
+        // branch to the wrong place.
+        assert!(
+            veneer_offset - offset <= kind.max_pos_range(),
+            "veneer at {veneer_offset} is out of range of {kind:?} at {offset}",
+        );
         let start = offset as usize;
         let end = (offset + kind.patch_size()) as usize;
         let slice = &mut self.data[start..end];
