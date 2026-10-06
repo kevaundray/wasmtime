@@ -3169,4 +3169,79 @@ mod test {
         let buf = buf.finish(&constants, state.ctrl_plane_mut());
         let _ = buf.total_size();
     }
+
+    /// The default edge of an AArch64 `JTSequence` must reach the default
+    /// label even when the inline jump table is larger than the +/- 1 MiB
+    /// range of a conditional branch. The table is part of the same
+    /// instruction, so no island (and thus no veneer) can be placed between
+    /// the default branch and the end of the table.
+    #[test]
+    fn test_jt_sequence_far_default() {
+        use crate::isa::aarch64::inst::writable_xreg;
+
+        // Smallest table size for which a veneer placed right after the
+        // table is out of `Branch19` range of the default branch.
+        const N: usize = 262_137;
+
+        let info = emit_info();
+        let mut buf = MachBuffer::new();
+        let mut state = <Inst as MachInstEmit>::State::default();
+        let constants = Default::default();
+
+        buf.reserve_labels_for_blocks(3);
+        buf.bind_label(label(0), state.ctrl_plane_mut());
+        let inst = Inst::JTSequence {
+            default: label(2),
+            targets: Box::new(vec![label(1); N]),
+            ridx: xreg(0),
+            rtmp1: writable_xreg(1),
+            rtmp2: writable_xreg(2),
+        };
+        inst.emit(&mut buf, &info, &mut state);
+        // As in `VCode::emit`: an island after the instruction if needed.
+        let lookahead = Inst::worst_case_size() + Inst::worst_case_island_growth();
+        if buf.island_needed(lookahead) {
+            let jump_around = buf.get_label();
+            Inst::gen_jump(jump_around).emit(&mut buf, &info, &mut state);
+            buf.emit_island(0, state.ctrl_plane_mut());
+            buf.bind_label(jump_around, state.ctrl_plane_mut());
+        }
+
+        buf.bind_label(label(1), state.ctrl_plane_mut());
+        Inst::Nop4.emit(&mut buf, &info, &mut state);
+        let default_offset = buf.cur_offset();
+        buf.bind_label(label(2), state.ctrl_plane_mut());
+        Inst::Udf {
+            trap_code: TrapCode::STACK_OVERFLOW,
+        }
+        .emit(&mut buf, &info, &mut state);
+
+        let buf = buf.finish(&constants, state.ctrl_plane_mut());
+        let sext = |x: u32, bits: u32| i64::from((x << (32 - bits)) as i32 >> (32 - bits));
+
+        // Follow the path taken for an out-of-range index (flags `hs`, i.e.
+        // carry set) from the start of the sequence through any branches.
+        let mut pc: i64 = 0;
+        for _ in 0..8 {
+            let off = usize::try_from(pc)
+                .ok()
+                .filter(|&o| o + 4 <= buf.data.len());
+            let off = off.unwrap_or_else(|| panic!("default edge leaves the code at offset {pc}"));
+            let w = u32::from_le_bytes(buf.data[off..off + 4].try_into().unwrap());
+            if w & 0xff00_0010 == 0x5400_0000 {
+                // b.cond: `hs` (0b0010) is taken, `lo` (0b0011) falls through.
+                match w & 0xf {
+                    0b0010 => pc += 4 * sext((w >> 5) & 0x7_ffff, 19),
+                    0b0011 => pc += 4,
+                    c => panic!("unexpected condition {c:#b} at {pc:#x}"),
+                }
+            } else if w & 0xfc00_0000 == 0x1400_0000 {
+                // b
+                pc += 4 * sext(w & 0x3ff_ffff, 26);
+            } else {
+                break;
+            }
+        }
+        assert_eq!(pc, i64::from(default_offset));
+    }
 }
